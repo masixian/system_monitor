@@ -1,0 +1,17 @@
+{
+    "RabbitMQ": {
+        "Host": "139.196.255.76",
+        "Port": 5672,
+        "Username": "admin",
+        "Password": "admin",
+        "QueueName": "SystemMonitorQueue",
+        "AlertExchange": "alertMessage_exchange"
+    },
+    "Logging": {
+        "LogFilePath": "/var/log/system_monitor/systemmonitor.log"
+    },
+    "HttpAlert": {
+        "HttpIp": "139.196.255.76",
+        "HttpPort": 18080
+    }
+}

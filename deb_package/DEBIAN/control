@@ -1,0 +1,8 @@
+Package: system-monitor
+Version: 1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: python3, inotify-tools, zenity
+Maintainer: msx <msx@example.com>
+Description: System Monitor Service for hardware, software, and process monitoring

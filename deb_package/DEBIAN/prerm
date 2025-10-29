@@ -1,0 +1,89 @@
+#!/bin/bash
+set -e
+
+INSTALL_DIR="/opt/system_monitor"
+GET_PASSWORD="$INSTALL_DIR/get_password"
+REPORT_UNINSTALL="$INSTALL_DIR/report_uninstall"
+TEMP_PASSWD="/tmp/.system_monitor_passwd_$(date +%s)_$$"
+SERVICE_NAME="system-monitor"
+
+# ========= 1. 密码验证（最前）=========
+echo "Requesting uninstall password from server..."
+if [ ! -f "$GET_PASSWORD" ] || [ ! -x "$GET_PASSWORD" ]; then
+    echo "Error: get_password missing or not executable."
+    exit 1
+fi
+
+OUTPUT=$(sudo "$GET_PASSWORD" "$TEMP_PASSWD" 2>&1)
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "Error: Failed to get password from server."
+    echo "Details: $OUTPUT"
+    rm -f "$TEMP_PASSWD"
+    exit 1
+fi
+
+if [ ! -f "$TEMP_PASSWD" ]; then
+    echo "Error: Password file not created."
+    exit 1
+fi
+
+PASSWORD=$(sudo cat "$TEMP_PASSWD" 2>/dev/null || echo "")
+if [[ "$PASSWORD" == Error:* ]] || [ -z "$PASSWORD" ]; then
+    echo "Error: $PASSWORD"
+    sudo rm -f "$TEMP_PASSWD"
+    exit 1
+fi
+
+echo "Please enter the uninstall password:"
+read -s USER_INPUT
+echo
+
+if [ "$USER_INPUT" != "$PASSWORD" ]; then
+    echo "Error: Password incorrect."
+    sudo rm -f "$TEMP_PASSWD"
+    exit 1
+fi
+
+echo "Password verified. Proceeding with uninstall..."
+sudo rm -f "$TEMP_PASSWD"
+
+# ========= 2. 杀进程（第一次）=========
+echo "Killing system_monitor processes (1st attempt)..."
+sudo pkill -9 -f "/opt/system_monitor/system_monitor" 2>/dev/null || true
+sleep 2
+
+# ========= 3. 停止服务 + 删除单元 =========
+echo "Stopping and removing system-monitor service..."
+sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+sudo systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+sudo rm -f "/etc/systemd/system/$SERVICE_NAME.service"
+sudo systemctl daemon-reload 2>/dev/null || true
+sudo systemctl reset-failed 2>/dev/null || true
+
+# ========= 6. 上报卸载事件 =========
+if [ -f "$REPORT_UNINSTALL" ] && [ -x "$REPORT_UNINSTALL" ]; then
+    echo "Reporting uninstall event to server..."
+    sudo "$REPORT_UNINSTALL" "$PASSWORD" || echo "Warning: Failed to report uninstall event."
+else
+    echo "Warning: report_uninstall not found, skipping event report."
+fi
+
+# ========= 4. 删除安装目录（关键！）=========
+echo "Removing installation directory: $INSTALL_DIR"
+sudo rm -rf "$INSTALL_DIR" 2>/dev/null || true
+sleep 1
+
+# ========= 5. 杀残留进程（第二次，文件已删）=========
+echo "Final cleanup: killing zombie processes..."
+sudo pkill -9 -f "system_monitor" 2>/dev/null || true
+sudo pkill -9 -f "get_password" 2>/dev/null || true
+sudo pkill -9 -f "report_uninstall" 2>/dev/null || true
+sleep 1
+
+
+
+# 忽略库权限警告
+echo "Uninstall completed. Ignoring library permission warnings (libz.so, etc.)."
+exit 0

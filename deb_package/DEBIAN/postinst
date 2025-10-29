@@ -1,0 +1,77 @@
+#!/bin/bash
+set -e
+
+INSTALL_DIR="/opt/system_monitor"
+LOG_DIR="/var/log/system_monitor"
+SERVICE_NAME="system-monitor"
+SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+
+# 安装依赖
+pip3 install psutil pika inotify netifaces > /dev/null 2>&1 || true
+
+# 创建目录
+mkdir -p "$INSTALL_DIR" "$LOG_DIR"
+chown root:root "$INSTALL_DIR" "$LOG_DIR"
+chmod 700 "$INSTALL_DIR" "$LOG_DIR"
+
+# 设置文件权限（不使用 chattr +i）
+chown root:root "$INSTALL_DIR/system_monitor" "$INSTALL_DIR/get_password" "$INSTALL_DIR/report_uninstall" "$INSTALL_DIR/config.json"
+chmod 500 "$INSTALL_DIR/system_monitor" "$INSTALL_DIR/get_password" "$INSTALL_DIR/report_uninstall"
+chmod 600 "$INSTALL_DIR/config.json"
+
+# === 修复 libz.so 和 libbz2.so ===
+echo "Fixing zlib and bz2 library permissions..."
+
+# 修复所有可能的 libz.so 和 libbz2.so
+for lib in libz.so libz.so.1 libbz2.so libbz2.so.1; do
+    sudo find /usr/lib /usr/local/lib /lib /lib64 /usr/lib/x86_64-linux-gnu \
+        -name "$lib*" -exec chmod 755 {} \; 2>/dev/null || true
+done
+
+# 刷新 ldconfig
+sudo ldconfig 2>/dev/null || true
+
+# 关闭 AppArmor 限制
+if command -v aa-disable >/dev/null 2>&1; then
+    sudo aa-disable /opt/system_monitor/system_monitor 2>/dev/null || true
+    sudo aa-disable /opt/system_monitor/get_password 2>/dev/null || true
+    sudo aa-disable /opt/system_monitor/report_uninstall 2>/dev/null || true
+fi
+
+# SELinux 上下文
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+    sudo chcon -t bin_t "$INSTALL_DIR/"* 2>/dev/null || true
+fi
+
+# 创建 systemd 服务
+cat > "$SERVICE_FILE" << EOL
+[Unit]
+Description=System Monitor Service
+After=network.target
+
+[Service]
+ExecStart=$INSTALL_DIR/system_monitor
+WorkingDirectory=$INSTALL_DIR
+Restart=always
+User=root
+KillMode=none
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+chown root:root "$SERVICE_FILE"
+chmod 644 "$SERVICE_FILE"
+
+# 启动服务
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
+systemctl start "$SERVICE_NAME" > /dev/null 2>&1 || true
+
+# 恢复 dpkg 数据库
+if [ ! -d "/var/lib/dpkg/info" ] && [ -d "/var/lib/dpkg/info.bak" ]; then
+    mv /var/lib/dpkg/info.bak /var/lib/dpkg/info
+fi
+
+echo "System Monitor installed successfully."
+exit 0
