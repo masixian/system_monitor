@@ -1,30 +1,78 @@
 #!/bin/bash
 set -e
 
+echo "Checking operating system..."
+
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_NAME="$NAME"
+    OS_ID="$ID"
+    OS_VERSION="$VERSION_ID"
+else
+    OS_NAME="Unknown"
+    OS_ID="unknown"
+fi
+
+if command -v lsb_release >/dev/null 2>&1; then
+    LSB_NAME=$(lsb_release -is 2>/dev/null || echo "Unknown")
+    LSB_VERSION=$(lsb_release -rs 2>/dev/null || echo "Unknown")
+else
+    LSB_NAME="Unknown"
+fi
+
+echo "Detected OS: $OS_NAME ($OS_ID) Version: $OS_VERSION"
+echo "lsb_release: $LSB_NAME $LSB_VERSION"
+
+# 允许的系统列表（大小写不敏感）
+ALLOWED_OS=("kylin" "galaxy kylin" "kylinos")
+
+# 转换为小写进行匹配
+OS_LOWER=$(echo "$OS_NAME $OS_ID $LSB_NAME" | tr '[:upper:]' '[:lower:]')
+
+MATCHED=0
+for allowed in "${ALLOWED_OS[@]}"; do
+    if echo "$OS_LOWER" | grep -q "$allowed"; then
+        MATCHED=1
+        echo "System check passed: $OS_NAME is a supported Kylin OS."
+        break
+    fi
+done
+
+if [ $MATCHED -eq 0 ]; then
+    echo "ERROR: This package can only be installed on Kylin OS (银河麒麟)."
+    echo "Detected: $OS_NAME ($OS_ID)"
+    echo "Installation aborted."
+    exit 1
+fi
+
 INSTALL_DIR="/opt/system_monitor"
 LOG_DIR="/var/log/system_monitor"
+RUNTIME_TMP="$INSTALL_DIR/tmp"
 SERVICE_NAME="system-monitor"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 
 # 安装依赖
-pip3 install psutil pika inotify netifaces > /dev/null 2>&1 || true
+pip3 install psutil pika inotify netifaces requests  > /dev/null 2>&1 || true
 
 # 创建目录
-mkdir -p "$INSTALL_DIR" "$LOG_DIR"
-chown root:root "$INSTALL_DIR" "$LOG_DIR"
+mkdir -p "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP"
+chown root:root "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP"
 chmod 700 "$INSTALL_DIR" "$LOG_DIR"
+chmod 700 "$RUNTIME_TMP"  # 仅 root 可访问
 
 # 设置文件权限（不使用 chattr +i）
 chown root:root "$INSTALL_DIR/system_monitor" "$INSTALL_DIR/get_password" "$INSTALL_DIR/report_uninstall" "$INSTALL_DIR/config.json"
 chmod 500 "$INSTALL_DIR/system_monitor" "$INSTALL_DIR/get_password" "$INSTALL_DIR/report_uninstall"
+find "$INSTALL_DIR" -type f -exec chown root:root {} \;
+find "$INSTALL_DIR" -type f -exec chmod 500 {} \;
 chmod 600 "$INSTALL_DIR/config.json"
 
 # === 修复 libz.so 和 libbz2.so ===
 echo "Fixing zlib and bz2 library permissions..."
 
 # 修复所有可能的 libz.so 和 libbz2.so
-for lib in libz.so libz.so.1 libbz2.so libbz2.so.1; do
-    sudo find /usr/lib /usr/local/lib /lib /lib64 /usr/lib/x86_64-linux-gnu \
+for lib in libz.so libz.so.1 libbz2.so libbz2.so.1 libbz2.so.1.0 libcrypto.so.1.1 libssl.so.1.1; do
+    find /usr/lib /lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu \
         -name "$lib*" -exec chmod 755 {} \; 2>/dev/null || true
 done
 
@@ -52,6 +100,11 @@ After=network.target
 [Service]
 ExecStart=$INSTALL_DIR/system_monitor
 WorkingDirectory=$INSTALL_DIR
+Environment="PYINSTALLER_TMP=$RUNTIME_TMP"
+Environment="LD_LIBRARY_PATH=$INSTALL_DIR/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+PrivateTmp=no
+ProtectSystem=full
+ProtectHome=yes
 Restart=always
 User=root
 KillMode=none
@@ -62,6 +115,50 @@ EOL
 
 chown root:root "$SERVICE_FILE"
 chmod 644 "$SERVICE_FILE"
+chown root:root "/etc/systemd/system/$SERVICE_NAME.service"
+chmod 644 "/etc/systemd/system/$SERVICE_NAME.service"
+
+# ============ 8. 麒麟安全中心白名单 ============
+echo "Registering Kylin Security Center whitelist..."
+sudo mkdir -p /etc/ksc
+sudo tee /etc/ksc/whitelist.conf > /dev/null << EOF
+# System Monitor Auto-Generated Whitelist
+[binary]
+$INSTALL_DIR/system_monitor = allow
+$INSTALL_DIR/get_password = allow
+$INSTALL_DIR/report_uninstall = allow
+
+[library]
+libz.so.1 = allow
+libcrypto.so.1.1 = allow
+libbz2.so.1.0 = allow
+libssl.so.1.1 = allow
+libffi.so.7 = allow
+libexpat.so.1 = allow
+
+[directory]
+$RUNTIME_TMP = allow
+EOF
+sudo chmod 644 /etc/ksc/whitelist.conf
+
+# 调用 ksc-cli（如果存在）
+if command -v ksc-cli >/dev/null 2>&1; then
+    sudo ksc-cli whitelist add --path "$INSTALL_DIR/system_monitor" --type binary --reason "System Monitor" 2>/dev/null || true
+    sudo ksc-cli policy reload 2>/dev/null || true
+fi
+
+# ============ 9. 开机自动清理 /tmp/_MEI* ============
+echo "Setting up PyInstaller temp cleanup..."
+sudo tee /usr/local/bin/cleanup-pyinstaller-tmp.sh > /dev/null << 'EOF'
+#!/bin/bash
+# 清理旧的 PyInstaller 临时目录
+find /tmp -name "_MEI*" -type d -exec rm -rf {} + 2>/dev/null || true
+EOF
+sudo chmod +x /usr/local/bin/cleanup-pyinstaller-tmp.sh
+
+# 添加开机任务
+echo "root /usr/local/bin/cleanup-pyinstaller-tmp.sh" | sudo tee /etc/cron.@reboot > /dev/null
+
 
 # 启动服务
 systemctl daemon-reload

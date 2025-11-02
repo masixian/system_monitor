@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 import sys
 import json
-import pika
 import time
 import netifaces
 import os
+import requests
+from datetime import datetime
 
 def print_error(msg):
     print(msg, file=sys.stderr)
     sys.exit(1)
 
 def get_device_id():
-    """返回带冒号的 MAC 地址：00:0c:29:b0:8d:55"""
     try:
         for iface in netifaces.interfaces():
             addrs = netifaces.ifaddresses(iface)
@@ -19,10 +19,31 @@ def get_device_id():
                 mac = addrs[netifaces.AF_LINK][0]['addr']
                 if mac and mac != '00:00:00:00:00:00' and iface != 'lo':
                     if 'virtual' not in iface.lower() and 'vmware' not in iface.lower():
-                        return mac  # 直接返回带冒号的格式
+                        return mac.upper()
         return None
     except Exception as e:
         print_error(f"Error: 获取 MAC 地址失败: {e}")
+
+def is_expired(exp_str):
+    """
+    直接字符串比较 expirationTime 是否 > 当前时间
+    格式：YYYY-MM-DD HH:MM:SS
+    支持 2025-11-31 等非法日期（只要字符串更大，即视为未过期）
+    """
+    try:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Debug: 当前时间字符串: {now_str}", file=sys.stderr)
+        print(f"Debug: 过期时间字符串: {exp_str}", file=sys.stderr)
+        
+        # 直接字符串比较（字典序与时间序一致）
+        if exp_str > now_str:
+            print(f"Debug: 字符串比较通过: {exp_str} > {now_str}", file=sys.stderr)
+            return False  # 未过期
+        else:
+            print(f"Debug: 字符串比较失败: {exp_str} <= {now_str}", file=sys.stderr)
+            return True  # 已过期
+    except Exception as e:
+        print_error(f"Error: 字符串比较失败: {e}")
 
 def main(output_file):
     try:
@@ -33,98 +54,92 @@ def main(output_file):
         with open(config_path) as f:
             config = json.load(f)
 
-        # 2. 获取带冒号的 MAC
+        # 2. 获取 MAC
         local_mac = get_device_id()
         if not local_mac:
             print_error("Error: 无法获取本机 MAC 地址")
-        print(f"Debug: 本机 MAC (带冒号): {local_mac}", file=sys.stderr)
+        print(f"Debug: 本机 MAC: {local_mac}", file=sys.stderr)
 
-        # 3. 队列名：requirepass_queue_00:0c:29:b0:8d:55
-        queue_name = f"requirepass_queue_{local_mac}"
-        print(f"Debug: 监听队列: {queue_name}", file=sys.stderr)
+        # 3. 构造 HTTP 请求
+        url = f"http://{config['HttpAlert']['HttpIp']}:{config['HttpAlert']['HttpPort']}/softhardware/client-uninstall/password/verify"
+        headers = {
+            'User-Agent': 'system-monitor-client/1.0',
+            'Content-Type': 'application/json',
+            'Accept': '*/*',
+            'Connection': 'keep-alive'
+        }
+        payload = {
+            "token": "rjzbh_uninstall_password_token@sgcc",
+            "mac": local_mac,
+            "password": "1"
+        }
 
-        # 4. 轮询获取消息（5秒超时）
-        password = None
+        print(f"Debug: POST {url}", file=sys.stderr)
+        print(f"Debug: 请求体: {json.dumps(payload, ensure_ascii=False)}", file=sys.stderr)
+
+        # 4. 发送请求
         start_time = time.time()
-        timeout_sec = 5
-
-        while (time.time() - start_time) < timeout_sec:
-            connection = None
-            channel = None
+        response = None
+        while time.time() - start_time < 5:
             try:
-                # 连接 RabbitMQ
-                credentials = pika.PlainCredentials(config["RabbitMQ"]["Username"], config["RabbitMQ"]["Password"])
-                connection = pika.BlockingConnection(
-                    pika.ConnectionParameters(
-                        host=config["RabbitMQ"]["Host"],
-                        port=config["RabbitMQ"]["Port"],
-                        credentials=credentials,
-                        heartbeat=0,
-                        connection_attempts=1
-                    )
-                )
-                channel = connection.channel()
-
-                # 声明 exchange 和队列
-                channel.exchange_declare(exchange="requirepass_exchange", exchange_type='fanout', durable=True)
-                channel.queue_declare(queue=queue_name, durable=True)
-                channel.queue_bind(queue=queue_name, exchange="requirepass_exchange", routing_key="")
-
-                # 轮询 basic_get
-                method, properties, body = channel.basic_get(queue=queue_name, auto_ack=False)
-                if method is None:
-                    time.sleep(0.2)
-                    continue
-
-                # 解析消息
-                message = body.decode('utf-8')
-                print(f"Debug: 收到消息: {message}", file=sys.stderr)
-                data = json.loads(message)
-
-                # 关键：使用带冒号的 MAC 作为键
-                if local_mac in data:
-                    pwd = data[local_mac].get("password")
-                    exp_time = data[local_mac].get("expirationTime")
-                    if pwd and exp_time:
-                        try:
-                            exp_dt = time.strptime(exp_time, "%Y-%m-%d %H:%M:%S")
-                            if time.mktime(exp_dt) > time.time():
-                                password = pwd
-                                # 保留消息
-                                channel.basic_reject(method.delivery_tag, requeue=True)
-                                print(f"Debug: 密码匹配成功: {pwd}", file=sys.stderr)
-                                break
-                            else:
-                                channel.basic_reject(method.delivery_tag, requeue=False)
-                                print("Debug: 密码已过期", file=sys.stderr)
-                        except Exception as e:
-                            channel.basic_reject(method.delivery_tag, requeue=False)
-                            print(f"Debug: 时间解析失败: {e}", file=sys.stderr)
-                    else:
-                        channel.basic_reject(method.delivery_tag, requeue=False)
-                else:
-                    print(f"Debug: MAC 不匹配，期望: {local_mac}, 实际键: {list(data.keys())}", file=sys.stderr)
-                    channel.basic_reject(method.delivery_tag, requeue=False)
-
+                response = requests.post(url, json=payload, headers=headers, timeout=3)
+                print(f"Debug: HTTP 状态码: {response.status_code}", file=sys.stderr)
+                print(f"Debug: 原始响应体: {response.text}", file=sys.stderr)
+                if response.status_code == 200:
+                    break
             except Exception as e:
-                print(f"Debug: 连接异常: {e}", file=sys.stderr)
-                time.sleep(0.5)
-            finally:
-                if channel and channel.is_open:
-                    try: channel.close()
-                    except: pass
-                if connection and connection.is_open:
-                    try: connection.close()
-                    except: pass
+                print(f"Debug: 请求异常: {e}, 重试...", file=sys.stderr)
+            time.sleep(0.5)
 
-        # 5. 结果
-        if not password:
-            print_error("Error: 超时，未收到符合条件的密码消息")
+        if not response or response.status_code != 200:
+            print_error(f"Error: HTTP 请求失败: {response.status_code if response else 'timeout'}")
+
+        # 5. 解析响应
+        try:
+            data = response.json()
+            print(f"Debug: 解析后 JSON: {json.dumps(data, ensure_ascii=False)}", file=sys.stderr)
+
+            # MAC 变体匹配
+            mac_variants = [
+                local_mac,
+                local_mac.lower(),
+                local_mac.replace(':', ''),
+                local_mac.replace(':', '').lower()
+            ]
+
+            matched_key = None
+            for variant in mac_variants:
+                if variant in data:
+                    matched_key = variant
+                    print(f"Debug: MAC 匹配成功: {variant}", file=sys.stderr)
+                    break
+
+            if not matched_key:
+                print_error(f"Error: MAC 不匹配，服务器返回键: {list(data.keys())}")
+
+            pwd = data[matched_key].get("password")
+            exp_time_str = data[matched_key].get("expirationTime")
+
+            if not pwd or not exp_time_str:
+                print_error("Error: 响应缺少 password 或 expirationTime")
+
+            print(f"Debug: 密码: {pwd}", file=sys.stderr)
+            print(f"Debug: 过期时间字符串: {exp_time_str}", file=sys.stderr)
+
+            # === 关键：字符串比较，不解析日期 ===
+            if is_expired(exp_time_str):
+                print_error("Error: 密码已过期（字符串比较）")
+
+            print(f"Debug: 密码有效！", file=sys.stderr)
+
+        except Exception as e:
+            print_error(f"Error: 响应处理失败: {e}")
 
         # 6. 写入文件
         with open(output_file, 'w') as f:
-            f.write(password)
+            f.write(pwd)
         os.chmod(output_file, 0o600)
+        print(f"Debug: 密码已写入: {output_file}", file=sys.stderr)
 
     except Exception as e:
         print_error(f"Error: 未知错误: {e}")
