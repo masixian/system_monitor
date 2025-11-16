@@ -23,6 +23,9 @@ $(find bundled_libs -name "*.so*" -exec echo --add-binary "{}:lib" \;) \
 --runtime-tmpdir /opt/system_monitor/tmp \
 --hidden-import netifaces \
 --hidden-import psutil \
+--hidden-import rocketmq.client \
+--collect-all rocketmq_client_cpp \
+--hidden-import psurocketmq.exceptionstil \
 --collect-all pika \
 --collect-all requests \
 -F main.py

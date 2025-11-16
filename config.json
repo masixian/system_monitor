@@ -1,17 +1,25 @@
 {
-    "RabbitMQ": {
-        "Host": "139.196.255.76",
-        "Port": 5672,
-        "Username": "admin",
-        "Password": "admin",
-        "QueueName": "SystemMonitorQueue",
-        "AlertExchange": "alertMessage_exchange"
-    },
-    "Logging": {
-        "LogFilePath": "/var/log/system_monitor/systemmonitor.log"
-    },
-    "HttpAlert": {
-        "HttpIp": "139.196.255.76",
-        "HttpPort": 18080
-    }
+  "MQType": "RabbitMQ",
+  "RabbitMQ": {
+    "Host": "139.196.255.76",
+    "Port": 5672,
+    "Username": "admin",
+    "Password": "admin",
+    "QueueName": "SystemMonitorQueue",
+    "AlertExchange": "alertMessage_exchange"
+  },
+  "RocketMQ": {
+    "NameServerAddress": "125.76.228.116:9876",
+    "GroupName": "system_monitor_producer_group",
+    "Topic": "SystemMonitorQueue",
+    "AccessKey": "rocketmq",
+    "SecretKey": "12345678"
+  },
+  "Logging": {
+    "LogFilePath": "/var/log/system_monitor/systemmonitor.log"
+  },
+  "HttpAlert": {
+    "HttpIp": "139.196.255.76",
+    "HttpPort": 18080
+  }
 }

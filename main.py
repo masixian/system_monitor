@@ -1,3 +1,4 @@
+# /opt/system_monitor/main.py
 import json
 import subprocess
 import time
@@ -11,19 +12,18 @@ import requests
 from datetime import datetime, timedelta, date
 from threading import Thread, Lock
 from hardware_info import get_hardware_info
+from process_start_monitor import ProcessStartMonitor
 from software_info import get_installed_software
 from process_monitor import get_running_processes
 from install_monitor import InstallMonitor
-from rabbitmq_service import RabbitMQService
+from mq_service import create_mq_service  # 修改导入
 
-# ==================== 配置日志 ====================
 logging.basicConfig(
     filename='/var/log/system_monitor/systemmonitor.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# ==================== 主服务类 ====================
 class SystemMonitorService:
     def __init__(self):
         self.config_path = '/opt/system_monitor/config.json'
@@ -38,13 +38,16 @@ class SystemMonitorService:
             logging.error(f"Failed to load config: {e}")
             sys.exit(1)
 
-        self.rabbitmq_service = RabbitMQService(self.config)
+        # 使用工厂创建 MQ 服务
+        self.mq_service = create_mq_service(self.config)
         self.device_id = get_hardware_info().device_id
         if not self.device_id:
             logging.error("Failed to get DeviceId")
             sys.exit(1)
 
-        self.install_monitor = InstallMonitor(self.rabbitmq_service, self.device_id)
+        self.process_start_monitor = None
+
+        self.install_monitor = InstallMonitor(self.mq_service, self.device_id)
         self.http_client = requests.Session()
         self.http_client.timeout = 30
         self.http_client.headers.update({
@@ -53,7 +56,7 @@ class SystemMonitorService:
             "Connection": "keep-alive"
         })
 
-        # 定时器：每分钟检查一次
+        # 定时器
         self.check_interval = 60
         self.upload_retry_count = 0
         self.alert_retry_count = 0
@@ -73,11 +76,10 @@ class SystemMonitorService:
         self.start_background_threads()
 
     def calculate_daily_times(self):
-        """基于 DeviceId 生成 11:00-14:00 内的随机时间（上传和告警同时间）"""
         try:
             seed = int(hashlib.md5(self.device_id.encode()).hexdigest(), 16) % (2**31)
             rnd = random.Random(seed)
-            minutes = rnd.randint(0, 179)  # 11:00 ~ 13:59
+            minutes = rnd.randint(0, 179)
             self.daily_upload_time = timedelta(hours=11, minutes=minutes)
             self.daily_alert_time = self.daily_upload_time
             logging.info(f"Daily upload/alert time set: {self.daily_upload_time}")
@@ -85,19 +87,29 @@ class SystemMonitorService:
             logging.error(f"Calculate daily times failed: {e}")
 
     def start_background_threads(self):
-        """启动安装监控 + 时间检查线程"""
-        Thread(target=self.install_monitor.start_monitoring, daemon=True).start()
-        Thread(target=self.time_check_loop, daemon=True).start()
+        # 安装/卸载监控
+        install_thread = Thread(target=self.install_monitor.start_monitoring, daemon=True)
+        install_thread.start()
+        logging.info("InstallMonitor thread started")
+
+        # 进程启动监控
+        self.process_start_monitor = ProcessStartMonitor(self.mq_service, self.device_id)
+        process_thread = Thread(target=self.process_start_monitor.start_monitoring, daemon=True)
+        process_thread.start()
+        logging.info("ProcessStartMonitor thread started")
+
+        # 时间检查
+        alert_thread = Thread(target=self.time_check_loop, daemon=True)
+        alert_thread.start()
+        logging.info("Time check loop thread started")
 
     def time_check_loop(self):
-        """每分钟检查一次时间、日期、触发动作"""
         while True:
             try:
                 now = datetime.now()
                 current_date = now.date()
                 current_time = now.time()
 
-                # 日期变化：重新缓存 + 重置标志
                 if current_date > self.last_cache_date:
                     logging.info(f"Date changed to {current_date}, regenerating cache")
                     self.cache_hardware_and_software()
@@ -105,7 +117,6 @@ class SystemMonitorService:
                     self.upload_triggered_today = False
                     self.alert_triggered_today = False
 
-                # 检查上传时间（1分钟窗口）
                 upload_start = (datetime.combine(current_date, datetime.min.time()) + self.daily_upload_time).time()
                 upload_end = (datetime.combine(current_date, datetime.min.time()) + self.daily_upload_time + timedelta(minutes=1)).time()
                 if not self.upload_triggered_today and upload_start <= current_time < upload_end:
@@ -113,7 +124,6 @@ class SystemMonitorService:
                     self.upload_cached_data()
                     self.upload_triggered_today = True
 
-                # 检查告警拉取时间（1分钟窗口）
                 alert_start = upload_start
                 alert_end = upload_end
                 if not self.alert_triggered_today and alert_start <= current_time < alert_end:
@@ -127,7 +137,6 @@ class SystemMonitorService:
                 time.sleep(self.check_interval)
 
     def cache_hardware_and_software(self):
-        """缓存硬件+软件信息到 cache.json"""
         try:
             hardware_info = get_hardware_info()
             software_list = get_installed_software()
@@ -150,7 +159,6 @@ class SystemMonitorService:
             logging.error(f"Cache failed: {e}")
 
     def upload_cached_data(self):
-        """上传缓存数据，失败则重试"""
         try:
             if not os.path.exists(self.cache_file):
                 logging.warning("Cache file missing, regenerating")
@@ -163,7 +171,7 @@ class SystemMonitorService:
                 message = json.load(f)
 
             message["Timestamp"] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+08:00'
-            if self.rabbitmq_service.send_message(message):
+            if self.mq_service.send_message(message):
                 with self.lock:
                     if os.path.exists(self.cache_file):
                         os.remove(self.cache_file)
@@ -176,18 +184,17 @@ class SystemMonitorService:
             logging.error(f"Upload error: {e}")
 
     def retry_upload(self, message):
-        """上传重试（最多3次，指数退避）"""
         if self.upload_retry_count >= self.max_upload_retries:
             logging.error("Max upload retries reached")
             return
 
         self.upload_retry_count += 1
-        delay = min(5 * (2 ** self.upload_retry_count), 300)  # 10s, 20s, 40s
+        delay = min(5 * (2 ** self.upload_retry_count), 300)
         logging.info(f"Upload retry {self.upload_retry_count}/{self.max_upload_retries} after {delay}s")
 
         time.sleep(delay)
         message["Timestamp"] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+08:00'
-        if self.rabbitmq_service.send_message(message):
+        if self.mq_service.send_message(message):
             with self.lock:
                 if os.path.exists(self.cache_file):
                     os.remove(self.cache_file)
@@ -197,7 +204,6 @@ class SystemMonitorService:
             self.retry_upload(message)
 
     def fetch_alert_messages(self):
-        """拉取告警（POST + 重试 + 可靠弹窗）"""
         try:
             formatted_mac = ':'.join([self.device_id[i:i+2].upper() for i in range(0, 12, 2)])
             url = f"http://{self.config['HttpAlert']['HttpIp']}:{self.config['HttpAlert']['HttpPort']}/softhardware/alert_log/alert/latest"
@@ -210,6 +216,10 @@ class SystemMonitorService:
                 try:
                     response = self.http_client.post(url, json=data, headers=headers)
                     logging.info(f"HTTP attempt {attempt}/{self.max_alert_retries}: status {response.status_code}")
+                    
+                    # 修复2：打印原始 JSON
+                    logging.info(f"Raw alert response: {response.text}")
+                    
                     if response.status_code == 200:
                         success = True
                         break
@@ -232,16 +242,17 @@ class SystemMonitorService:
                 logging.info("Empty alert response")
                 return
 
+            # 修复 MAC 匹配：忽略大小写和冒号
             clean_key = mac_key.replace(':', '').lower()
-            if clean_key != self.device_id.lower():
-                logging.info(f"MAC mismatch: expected {self.device_id}, got {clean_key}")
+            clean_device = self.device_id.lower()
+            if clean_key != clean_device:
+                logging.info(f"MAC mismatch: expected {clean_device}, got {clean_key}")
                 return
 
             alert_info = alert_data[mac_key]
             message = alert_info.get("message", "未知告警")
-            logging.info(f"Alert received: {message} | 硬件型号={alert_info.get('硬件型号','N/A')} | 设备名称={alert_info.get('设备名称','N/A')}")
+            logging.info(f"Alert received: {message} | 硬件型号={alert_info.get('硬件型号','N/A')}")
 
-            # 修复：调用正确的方法名
             self.show_reliable_alert(message)
 
         except Exception as e:
@@ -308,6 +319,24 @@ class SystemMonitorService:
         except Exception as e:
             logging.error(f"Log to file failed: {e}")
 
+    def start(self):
+        logging.info("SystemMonitorService started (persistent mode)")
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        try:
+            while True:
+                time.sleep(3600)
+        except:
+            pass
+
+    def signal_handler(self, sig, frame):
+        logging.warning("Termination signal received, ignoring...")
+
+    def stop(self):
+        self.mq_service.close()
+        logging.info("SystemMonitorService stopped")
+
+    # ============ CLI 测试入口 ============
     def test_alert_popup(self, message="测试告警：硬件变更"):
         try:
             print(f"Testing popup: {message}")
@@ -315,25 +344,6 @@ class SystemMonitorService:
             print("Popup command sent.")
         except Exception as e:
             print(f"Test failed: {e}")
-
-    def start(self):
-        logging.info("SystemMonitorService started (persistent mode)")
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        signal.signal(signal.SIGINT, self.signal_handler)
-        try:
-            while True:
-                time.sleep(3600)  # 主线程休眠，工作在子线程
-        except:
-            pass
-
-    def signal_handler(self, sig, frame):
-        logging.warning("Termination signal received, ignoring...")
-        # 不退出，保持运行
-
-    def stop(self):
-        self.rabbitmq_service.close()
-        logging.info("SystemMonitorService stopped")
-
 
 if __name__ == '__main__':
     import sys

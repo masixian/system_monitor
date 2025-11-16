@@ -71,7 +71,7 @@ def main(output_file):
         payload = {
             "token": "rjzbh_uninstall_password_token@sgcc",
             "mac": local_mac,
-            "password": "1"
+            "password": ""
         }
 
         print(f"Debug: POST {url}", file=sys.stderr)

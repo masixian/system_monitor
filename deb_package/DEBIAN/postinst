@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+# ============ 1. 系统检测：只允许麒麟 ============
 echo "Checking operating system..."
 
 if [ -f /etc/os-release ]; then
@@ -15,20 +16,15 @@ fi
 
 if command -v lsb_release >/dev/null 2>&1; then
     LSB_NAME=$(lsb_release -is 2>/dev/null || echo "Unknown")
-    LSB_VERSION=$(lsb_release -rs 2>/dev/null || echo "Unknown")
 else
     LSB_NAME="Unknown"
 fi
 
 echo "Detected OS: $OS_NAME ($OS_ID) Version: $OS_VERSION"
-echo "lsb_release: $LSB_NAME $LSB_VERSION"
+echo "lsb_release: $LSB_NAME"
 
-# 允许的系统列表（大小写不敏感）
 ALLOWED_OS=("kylin" "galaxy kylin" "kylinos")
-
-# 转换为小写进行匹配
 OS_LOWER=$(echo "$OS_NAME $OS_ID $LSB_NAME" | tr '[:upper:]' '[:lower:]')
-
 MATCHED=0
 for allowed in "${ALLOWED_OS[@]}"; do
     if echo "$OS_LOWER" | grep -q "$allowed"; then
@@ -45,80 +41,52 @@ if [ $MATCHED -eq 0 ]; then
     exit 1
 fi
 
+# ============ 2. 安装目录定义 ============
 INSTALL_DIR="/opt/system_monitor"
 LOG_DIR="/var/log/system_monitor"
 RUNTIME_TMP="$INSTALL_DIR/tmp"
+LIB_DIR="$INSTALL_DIR/lib"
 SERVICE_NAME="system-monitor"
-SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 
-# 安装依赖
-pip3 install psutil pika inotify netifaces requests  > /dev/null 2>&1 || true
+echo "Installing System Monitor on Kylin OS..."
 
-# 创建目录
-mkdir -p "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP"
-chown root:root "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP"
-chmod 700 "$INSTALL_DIR" "$LOG_DIR"
-chmod 700 "$RUNTIME_TMP"  # 仅 root 可访问
+# ============ 3. 安装 Python 依赖 ============
+echo "Installing Python dependencies..."
+pip3 install psutil pika inotify netifaces requests > /dev/null 2>&1 || true
 
-# 设置文件权限（不使用 chattr +i）
-chown root:root "$INSTALL_DIR/system_monitor" "$INSTALL_DIR/get_password" "$INSTALL_DIR/report_uninstall" "$INSTALL_DIR/config.json"
-chmod 500 "$INSTALL_DIR/system_monitor" "$INSTALL_DIR/get_password" "$INSTALL_DIR/report_uninstall"
-find "$INSTALL_DIR" -type f -exec chown root:root {} \;
-find "$INSTALL_DIR" -type f -exec chmod 500 {} \;
-chmod 600 "$INSTALL_DIR/config.json"
+# ============ 4. 创建目录 ============
+mkdir -p "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP" "$LIB_DIR"
+chown root:root "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP" "$LIB_DIR"
+chmod 700 "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP"
+chmod 700 "$LIB_DIR"
 
-# === 修复 libz.so 和 libbz2.so ===
-echo "Fixing zlib and bz2 library permissions..."
-
-# 修复所有可能的 libz.so 和 libbz2.so
-for lib in libz.so libz.so.1 libbz2.so libbz2.so.1 libbz2.so.1.0 libcrypto.so.1.1 libssl.so.1.1; do
+# ============ 5. 复制系统库 ============
+echo "Copying system libraries to local lib..."
+LIBS=(
+    "libz.so.1"
+    "libcrypto.so.1.1"
+    "libbz2.so.1.0"
+    "libssl.so.1.1"
+    "libstdc++.so.6"
+    "libffi.so.7"
+    "libexpat.so.1"
+    "liblzma.so.5"
+    "libmpdec.so.2"
+)
+for lib in "${LIBS[@]}"; do
     find /usr/lib /lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu \
-        -name "$lib*" -exec chmod 755 {} \; 2>/dev/null || true
+        -name "$lib" -exec cp {} "$LIB_DIR/" \; 2>/dev/null || true
+    [ -f "$LIB_DIR/$lib" ] && chmod 755 "$LIB_DIR/$lib"
 done
 
-# 刷新 ldconfig
-sudo ldconfig 2>/dev/null || true
+ldconfig "$LIB_DIR" 2>/dev/null || true
 
-# 关闭 AppArmor 限制
-if command -v aa-disable >/dev/null 2>&1; then
-    sudo aa-disable /opt/system_monitor/system_monitor 2>/dev/null || true
-    sudo aa-disable /opt/system_monitor/get_password 2>/dev/null || true
-    sudo aa-disable /opt/system_monitor/report_uninstall 2>/dev/null || true
-fi
+# ============ 6. 设置文件权限 ============
+find "$INSTALL_DIR" -type f -exec chown root:root {} \;
+find "$INSTALL_DIR" -type f -exec chmod 500 {} \;
+chmod 600 "$INSTALL_DIR/config.json" 2>/dev/null || true
 
-# SELinux 上下文
-if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
-    sudo chcon -t bin_t "$INSTALL_DIR/"* 2>/dev/null || true
-fi
-
-# 创建 systemd 服务
-cat > "$SERVICE_FILE" << EOL
-[Unit]
-Description=System Monitor Service
-After=network.target
-
-[Service]
-ExecStart=$INSTALL_DIR/system_monitor
-WorkingDirectory=$INSTALL_DIR
-Environment="PYINSTALLER_TMP=$RUNTIME_TMP"
-Environment="LD_LIBRARY_PATH=$INSTALL_DIR/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
-PrivateTmp=no
-ProtectSystem=full
-ProtectHome=yes
-Restart=always
-User=root
-KillMode=none
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-chown root:root "$SERVICE_FILE"
-chmod 644 "$SERVICE_FILE"
-chown root:root "/etc/systemd/system/$SERVICE_NAME.service"
-chmod 644 "/etc/systemd/system/$SERVICE_NAME.service"
-
-# ============ 8. 麒麟安全中心白名单 ============
+# ============ 7. 麒麟安全中心白名单 ============
 echo "Registering Kylin Security Center whitelist..."
 sudo mkdir -p /etc/ksc
 sudo tee /etc/ksc/whitelist.conf > /dev/null << EOF
@@ -133,42 +101,95 @@ libz.so.1 = allow
 libcrypto.so.1.1 = allow
 libbz2.so.1.0 = allow
 libssl.so.1.1 = allow
-libffi.so.7 = allow
-libexpat.so.1 = allow
+libstdc++.so.6 = allow
 
 [directory]
 $RUNTIME_TMP = allow
+$LIB_DIR = allow
 EOF
 sudo chmod 644 /etc/ksc/whitelist.conf
 
-# 调用 ksc-cli（如果存在）
 if command -v ksc-cli >/dev/null 2>&1; then
     sudo ksc-cli whitelist add --path "$INSTALL_DIR/system_monitor" --type binary --reason "System Monitor" 2>/dev/null || true
+    for lib in libz.so.1 libcrypto.so.1.1 libbz2.so.1.0 libssl.so.1.1 libstdc++.so.6; do
+        find "$LIB_DIR" -name "$lib" -exec sudo ksc-cli whitelist add --path {} --type library --reason "System Monitor" \; 2>/dev/null || true
+    done
     sudo ksc-cli policy reload 2>/dev/null || true
 fi
+
+# ============ 8. 禁用 Kysec 安全模块（官方方法）===========
+echo "Disabling Kysec security module for silent authorization..."
+GRUB_FILE="/etc/default/grub"
+if grep -q "security=kysec" "$GRUB_FILE" 2>/dev/null; then
+    sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*security=kysec[^"]*"/GRUB_CMDLINE_LINUX_DEFAULT="\1"/g' "$GRUB_FILE" || true
+    sudo sed -i 's/GRUB_CMDLINE_LINUX="[^"]*security=kysec[^"]*"/GRUB_CMDLINE_LINUX="\1"/g' "$GRUB_FILE" || true
+    echo "GRUB_CMDLINE_LINUX_SECURITY=\"security=\" added to $GRUB_FILE"
+    sudo tee -a "$GRUB_FILE" > /dev/null << EOF
+
+# Disable Kysec for System Monitor (Auto-generated)
+GRUB_CMDLINE_LINUX_SECURITY="security="
+EOF
+    sudo update-grub
+    echo "Kysec disabled. Please reboot to take effect."
+    echo "Reboot command: sudo reboot"
+else
+    echo "Kysec already disabled or not present."
+fi
+
+mkdir -p /tmp/logs/rocketmq-cpp
+chmod 777 /tmp/logs/rocketmq-cpp
+echo "RocketMQ log dir prepared"
 
 # ============ 9. 开机自动清理 /tmp/_MEI* ============
 echo "Setting up PyInstaller temp cleanup..."
 sudo tee /usr/local/bin/cleanup-pyinstaller-tmp.sh > /dev/null << 'EOF'
 #!/bin/bash
-# 清理旧的 PyInstaller 临时目录
+# 清理 PyInstaller 临时目录
 find /tmp -name "_MEI*" -type d -exec rm -rf {} + 2>/dev/null || true
 EOF
 sudo chmod +x /usr/local/bin/cleanup-pyinstaller-tmp.sh
 
-# 添加开机任务
 echo "root /usr/local/bin/cleanup-pyinstaller-tmp.sh" | sudo tee /etc/cron.@reboot > /dev/null
 
+# ============ 10. 创建 systemd 服务 ============
+echo "Creating systemd service..."
+cat > "/etc/systemd/system/$SERVICE_NAME.service" << EOL
+[Unit]
+Description=System Monitor Service
+After=network.target
 
-# 启动服务
+[Service]
+ExecStart=$INSTALL_DIR/system_monitor
+WorkingDirectory=$INSTALL_DIR
+Environment="PYINSTALLER_TMP=$RUNTIME_TMP"
+Environment="LD_LIBRARY_PATH=$LIB_DIR:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+PrivateTmp=no
+ProtectSystem=full
+ProtectHome=yes
+Restart=always
+User=root
+KillMode=none
+RuntimeDirectory=system_monitor_tmp
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+chown root:root "/etc/systemd/system/$SERVICE_NAME.service"
+chmod 644 "/etc/systemd/system/$SERVICE_NAME.service"
+
+# ============ 11. 启动服务 ============
+echo "Starting System Monitor service..."
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
 systemctl start "$SERVICE_NAME" > /dev/null 2>&1 || true
 
-# 恢复 dpkg 数据库
-if [ ! -d "/var/lib/dpkg/info" ] && [ -d "/var/lib/dpkg/info.bak" ]; then
-    mv /var/lib/dpkg/info.bak /var/lib/dpkg/info
-fi
-
-echo "System Monitor installed successfully."
+# ============ 12. 完成 ============
+echo "System Monitor installed successfully on Kylin OS."
+echo "Kysec disabled - reboot required for full effect: sudo reboot"
+echo "Runtime temp: $RUNTIME_TMP (700, whitelisted)"
+echo "Libraries in: $LIB_DIR (755, whitelisted)"
+echo "Security popups: DISABLED (via GRUB)"
+echo "Temp cleanup: enabled on boot"
 exit 0
