@@ -45,7 +45,7 @@ class InstallMonitor:
 
                 for pkg, info in new_packages.items():
                     message = {
-                        "DeviceId": self.device_id,
+                        "DeviceId": self.device_id.upper(),  # 大写
                         "Type": "SoftwareInstall",
                         "Timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+08:00',
                         "Data": {
@@ -61,7 +61,7 @@ class InstallMonitor:
 
                 for pkg, info in removed_packages.items():
                     message = {
-                        "DeviceId": self.device_id,
+                        "DeviceId": self.device_id.upper(),  # 大写
                         "Type": "SoftwareUninstall",
                         "Timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+08:00',
                         "Data": {

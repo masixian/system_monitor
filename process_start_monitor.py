@@ -55,7 +55,7 @@ class ProcessStartMonitor:
                             continue
 
                         message = {
-                            "DeviceId": self.device_id,
+                            "DeviceId": self.device_id.upper(),  # 大写
                             "Type": "ProcessStart",
                             "Timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+08:00',
                             "Data": {

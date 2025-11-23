@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# ============ 1. 系统检测：只允许麒麟 ============
 echo "Checking operating system..."
 
 if [ -f /etc/os-release ]; then

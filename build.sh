@@ -66,4 +66,4 @@ chmod 755 deb_package/DEBIAN/postinst deb_package/DEBIAN/prerm
 
 # 5. 构建
 dpkg-deb --build deb_package
-mv deb_package.deb system-monitor_1.0_amd64.deb
+mv deb_package.deb system-monitor_1.1_amd64.deb

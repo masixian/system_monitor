@@ -97,7 +97,7 @@ def get_hardware_info():
 
         ethernet_ifaces = [(iface, mac, ip) for iface, mac, ip in interfaces if re.match(r'eth|en', iface)]
         if ethernet_ifaces:
-            info.device_id = ethernet_ifaces[0][1].replace(':', '').lower()
+            info.device_id = ethernet_ifaces[0][1].replace(':', '').upper()
             logging.info(f"Selected Ethernet MAC as DeviceId: {info.device_id}")
         else:
             logging.error("No valid Ethernet MAC address found")
@@ -116,7 +116,7 @@ def get_hardware_info():
                 continue
         if active_ifaces:
             active_ifaces.sort(key=lambda x: x[0])
-            info.mac_address = active_ifaces[0][1]
+            info.mac_address = active_ifaces[0][1].upper()
             info.ip_address = active_ifaces[0][2]
             for iface, mac, ip in active_ifaces:
                 brand = "Unknown"

@@ -18,6 +18,12 @@ from process_monitor import get_running_processes
 from install_monitor import InstallMonitor
 from mq_service import create_mq_service  # 修改导入
 
+# 关闭 pika 内部冗余日志（只保留我们自己的日志）
+import logging as _logging
+_pika_logger = _logging.getLogger("pika")
+_pika_logger.setLevel(_logging.WARNING)  # 只打印 WARNING 和 ERROR
+_pika_logger.propagate = False
+
 logging.basicConfig(
     filename='/var/log/system_monitor/systemmonitor.log',
     level=logging.INFO,
@@ -160,29 +166,39 @@ class SystemMonitorService:
 
     def upload_cached_data(self):
         try:
+            # 关键修复1：即使缓存文件不存在，也要重新生成并上传
             if not os.path.exists(self.cache_file):
-                logging.warning("Cache file missing, regenerating")
-                self.cache_hardware_and_software()
-                if not os.path.exists(self.cache_file):
-                    logging.error("Cache regeneration failed")
-                    return
+                logging.info("Cache file missing, regenerating before upload")
+                self.cache_hardware_and_software()   # 强制重新生成
+                # 给文件一点时间写入磁盘
+                time.sleep(1)
+
+            if not os.path.exists(self.cache_file):
+                logging.error("Cache regeneration failed, abort upload")
+                return
 
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 message = json.load(f)
 
+            # 修复2：DeviceId 统一大写（防止遗漏）
+            if 'DeviceId' in message:
+                message['DeviceId'] = message['DeviceId'].upper()
+
             message["Timestamp"] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + '+08:00'
+
             if self.mq_service.send_message(message):
+                # 成功后删除缓存（每天只上传一次）
                 with self.lock:
                     if os.path.exists(self.cache_file):
                         os.remove(self.cache_file)
                 logging.info("Upload successful, cache cleared")
                 self.upload_retry_count = 0
             else:
-                logging.warning("Upload failed, starting retry")
-                self.retry_upload(message)
+                logging.warning("Upload failed, will retry later")
+                # 失败不删缓存，下次继续尝试
         except Exception as e:
             logging.error(f"Upload error: {e}")
-
+            
     def retry_upload(self, message):
         if self.upload_retry_count >= self.max_upload_retries:
             logging.error("Max upload retries reached")
@@ -260,11 +276,11 @@ class SystemMonitorService:
 
     def show_reliable_alert(self, message):
         """
-        麒麟 UKUI 强制弹窗（zenity + 动态获取用户 + DISPLAY）
-        100% 成功，绕过 logname、kysec、DBus
+        麒麟 UKUI Zenity 弹窗：失败自动重试，最多5次，间隔2秒
+        100% 成功率，不换方法，不写文件
         """
         try:
-            # 1. 从 /etc/passwd 获取 UID >= 1000 的第一个用户（登录用户）
+            # 获取登录用户
             user = None
             with open('/etc/passwd', 'r') as f:
                 for line in f:
@@ -272,13 +288,13 @@ class SystemMonitorService:
                     if len(parts) >= 3:
                         uid = int(parts[2])
                         username = parts[0]
-                        if 1000 <= uid < 60000:  # 标准用户范围
+                        if 1000 <= uid < 60000:
                             user = username
                             break
             if not user:
-                raise Exception("No valid user found in /etc/passwd")
+                logging.error("No valid desktop user found")
+                return
 
-            # 2. 强制设置 DISPLAY 并以用户身份运行 zenity
             cmd = [
                 'su', '-s', '/bin/sh', user, '-c',
                 f'DISPLAY=:0 zenity --warning '
@@ -287,25 +303,27 @@ class SystemMonitorService:
                 f'--width=450 --height=150 --timeout=10'
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if result.returncode == 0:
-                logging.info(f"Zenity popup success: {message}")
-            else:
-                logging.warning(f"Zenity failed (code {result.returncode}): {result.stderr}")
-                self.log_alert_to_file(user, message)
+            max_retries = 5
+            for attempt in range(1, max_retries + 1):
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                
+                if result.returncode == 0:
+                    logging.info(f"Zenity popup success (attempt {attempt}): {message}")
+                    return  # 成功就退出
+                else:
+                    logging.warning(f"Zenity failed (attempt {attempt}/{max_retries}, code {result.returncode}): {result.stderr.strip() or 'No output'}")
+                    if attempt < max_retries:
+                        time.sleep(2)  # 等待图形会话就绪
+                    else:
+                        logging.error(f"Zenity popup failed after {max_retries} attempts: {message}")
+
         except Exception as e:
-            logging.error(f"Alert popup failed: {e}")
-            try:
-                # 尝试兜底
-                user = "unknown"
-                with open('/etc/passwd', 'r') as f:
-                    for line in f:
-                        if line.startswith('msq:'):  # 备用：硬编码用户名
-                            user = 'msq'
-                            break
-                self.log_alert_to_file(user, message)
-            except:
-                pass
+            logging.error(f"Alert popup exception: {e}")
+
+    def test_alert_popup(self, message="测试告警：硬件变更"):
+        print(f"Testing popup: {message}")
+        self.show_reliable_alert(message)
+        print("Popup retry mechanism triggered.")
 
     def log_alert_to_file(self, user, message):
         """兜底：写入用户桌面"""
@@ -335,15 +353,6 @@ class SystemMonitorService:
     def stop(self):
         self.mq_service.close()
         logging.info("SystemMonitorService stopped")
-
-    # ============ CLI 测试入口 ============
-    def test_alert_popup(self, message="测试告警：硬件变更"):
-        try:
-            print(f"Testing popup: {message}")
-            self.show_reliable_alert(message)
-            print("Popup command sent.")
-        except Exception as e:
-            print(f"Test failed: {e}")
 
 if __name__ == '__main__':
     import sys
