@@ -84,7 +84,7 @@ def main(output_file):
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=3)
                 print(f"Debug: HTTP 状态码: {response.status_code}", file=sys.stderr)
-                print(f"Debug: 原始响应体: {response.text}", file=sys.stderr)
+              #  print(f"Debug: 原始响应体: {response.text}", file=sys.stderr)
                 if response.status_code == 200:
                     break
             except Exception as e:
@@ -97,7 +97,7 @@ def main(output_file):
         # 5. 解析响应
         try:
             data = response.json()
-            print(f"Debug: 解析后 JSON: {json.dumps(data, ensure_ascii=False)}", file=sys.stderr)
+         #   print(f"Debug: 解析后 JSON: {json.dumps(data, ensure_ascii=False)}", file=sys.stderr)
 
             # MAC 变体匹配
             mac_variants = [
@@ -123,7 +123,7 @@ def main(output_file):
             if not pwd or not exp_time_str:
                 print_error("Error: 响应缺少 password 或 expirationTime")
 
-            print(f"Debug: 密码: {pwd}", file=sys.stderr)
+         #   print(f"Debug: 密码: {pwd}", file=sys.stderr)
             print(f"Debug: 过期时间字符串: {exp_time_str}", file=sys.stderr)
 
             # === 关键：字符串比较，不解析日期 ===

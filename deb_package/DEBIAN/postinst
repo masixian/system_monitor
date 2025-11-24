@@ -1,173 +1,65 @@
 #!/bin/bash
 set -e
 
-echo "Checking operating system..."
+# ========= 卸载模式直接退出 =========
+[ "$SYSTEM_MONITOR_UNINSTALLING" = "1" ] && exit 0
 
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS_NAME="$NAME"
-    OS_ID="$ID"
-    OS_VERSION="$VERSION_ID"
-else
-    OS_NAME="Unknown"
-    OS_ID="unknown"
-fi
+# 防止 prerm/postrm 触发
+[ -n "$DPKG_MAINTSCRIPT_NAME" ] && [ "$DPKG_MAINTSCRIPT_NAME" != "postinst" ] && exit 0
 
-if command -v lsb_release >/dev/null 2>&1; then
-    LSB_NAME=$(lsb_release -is 2>/dev/null || echo "Unknown")
-else
-    LSB_NAME="Unknown"
-fi
-
-echo "Detected OS: $OS_NAME ($OS_ID) Version: $OS_VERSION"
-echo "lsb_release: $LSB_NAME"
-
-ALLOWED_OS=("kylin" "galaxy kylin" "kylinos")
-OS_LOWER=$(echo "$OS_NAME $OS_ID $LSB_NAME" | tr '[:upper:]' '[:lower:]')
-MATCHED=0
-for allowed in "${ALLOWED_OS[@]}"; do
-    if echo "$OS_LOWER" | grep -q "$allowed"; then
-        MATCHED=1
-        echo "System check passed: $OS_NAME is a supported Kylin OS."
-        break
-    fi
-done
-
-if [ $MATCHED -eq 0 ]; then
-    echo "ERROR: This package can only be installed on Kylin OS (银河麒麟)."
-    echo "Detected: $OS_NAME ($OS_ID)"
-    echo "Installation aborted."
-    exit 1
-fi
-
-# ============ 2. 安装目录定义 ============
 INSTALL_DIR="/opt/system_monitor"
 LOG_DIR="/var/log/system_monitor"
 RUNTIME_TMP="$INSTALL_DIR/tmp"
 LIB_DIR="$INSTALL_DIR/lib"
 SERVICE_NAME="system-monitor"
 
-echo "Installing System Monitor on Kylin OS..."
+# ========= 1. 永久关闭 Kysec（只执行一次）=========
+if ! grep -q 'GRUB_CMDLINE_LINUX_SECURITY="security="' /etc/default/grub 2>/dev/null; then
+    echo "Permanently disabling Kysec security popups..."
+    sudo cp /etc/default/grub /etc/default/grub.bak
+    sudo sed -i '/GRUB_CMDLINE_LINUX_DEFAULT=/ s/security=kysec//g' /etc/default/grub
+    sudo sed -i '/GRUB_CMDLINE_LINUX=/ s/security=kysec//g' /etc/default/grub
+    echo 'GRUB_CMDLINE_LINUX_SECURITY="security="' | sudo tee -a /etc/default/grub > /dev/null
+    sudo update-grub
+    echo "Kysec permanently disabled. Reboot once to take effect."
+fi
 
-# ============ 3. 安装 Python 依赖 ============
-echo "Installing Python dependencies..."
-pip3 install psutil pika inotify netifaces requests > /dev/null 2>&1 || true
+# ========= 2. 强制杀掉旧进程（热覆盖核心）=========
+echo "Terminating old processes for hot upgrade..."
+sudo pkill -9 -f "system_monitor" 2>/dev/null || true
+sudo pkill -9 -f "/opt/system_monitor" 2>/dev/null || true
+sleep 2
 
-# ============ 4. 创建目录 ============
+# ========= 3. 创建目录 =========
 mkdir -p "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP" "$LIB_DIR"
 chown root:root "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP" "$LIB_DIR"
-chmod 700 "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP"
-chmod 700 "$LIB_DIR"
+chmod 700 "$INSTALL_DIR" "$LOG_DIR" "$RUNTIME_TMP" "$LIB_DIR"
 
-# ============ 5. 复制系统库 ============
-echo "Copying system libraries to local lib..."
-LIBS=(
-    "libz.so.1"
-    "libcrypto.so.1.1"
-    "libbz2.so.1.0"
-    "libssl.so.1.1"
-    "libstdc++.so.6"
-    "libffi.so.7"
-    "libexpat.so.1"
-    "liblzma.so.5"
-    "libmpdec.so.2"
-)
-for lib in "${LIBS[@]}"; do
-    find /usr/lib /lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu \
-        -name "$lib" -exec cp {} "$LIB_DIR/" \; 2>/dev/null || true
-    [ -f "$LIB_DIR/$lib" ] && chmod 755 "$LIB_DIR/$lib"
+# ========= 4. 复制必要库（防止依赖丢失）=========
+for lib in libz.so.1 libcrypto.so.1.1 libbz2.so.1.0 libssl.so.1.1 libstdc++.so.6; do
+    find /usr/lib* -name "$lib*" -exec cp -f {} "$LIB_DIR/" \; 2>/dev/null || true
 done
+chmod 755 "$LIB_DIR"/* 2>/dev/null || true
 
-ldconfig "$LIB_DIR" 2>/dev/null || true
+# ========= 5. RocketMQ 日志目录 =========
+sudo mkdir -p /tmp/logs/rocketmq-cpp
+sudo chmod 777 /tmp/logs/rocketmq-cpp
 
-# ============ 6. 设置文件权限 ============
-find "$INSTALL_DIR" -type f -exec chown root:root {} \;
-find "$INSTALL_DIR" -type f -exec chmod 500 {} \;
-chmod 600 "$INSTALL_DIR/config.json" 2>/dev/null || true
-
-# ============ 7. 麒麟安全中心白名单 ============
-echo "Registering Kylin Security Center whitelist..."
-sudo mkdir -p /etc/ksc
-sudo tee /etc/ksc/whitelist.conf > /dev/null << EOF
-# System Monitor Auto-Generated Whitelist
-[binary]
-$INSTALL_DIR/system_monitor = allow
-$INSTALL_DIR/get_password = allow
-$INSTALL_DIR/report_uninstall = allow
-
-[library]
-libz.so.1 = allow
-libcrypto.so.1.1 = allow
-libbz2.so.1.0 = allow
-libssl.so.1.1 = allow
-libstdc++.so.6 = allow
-
-[directory]
-$RUNTIME_TMP = allow
-$LIB_DIR = allow
-EOF
-sudo chmod 644 /etc/ksc/whitelist.conf
-
-if command -v ksc-cli >/dev/null 2>&1; then
-    sudo ksc-cli whitelist add --path "$INSTALL_DIR/system_monitor" --type binary --reason "System Monitor" 2>/dev/null || true
-    for lib in libz.so.1 libcrypto.so.1.1 libbz2.so.1.0 libssl.so.1.1 libstdc++.so.6; do
-        find "$LIB_DIR" -name "$lib" -exec sudo ksc-cli whitelist add --path {} --type library --reason "System Monitor" \; 2>/dev/null || true
-    done
-    sudo ksc-cli policy reload 2>/dev/null || true
-fi
-
-# ============ 8. 禁用 Kysec 安全模块（官方方法）===========
-echo "Disabling Kysec security module for silent authorization..."
-GRUB_FILE="/etc/default/grub"
-if grep -q "security=kysec" "$GRUB_FILE" 2>/dev/null; then
-    sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*security=kysec[^"]*"/GRUB_CMDLINE_LINUX_DEFAULT="\1"/g' "$GRUB_FILE" || true
-    sudo sed -i 's/GRUB_CMDLINE_LINUX="[^"]*security=kysec[^"]*"/GRUB_CMDLINE_LINUX="\1"/g' "$GRUB_FILE" || true
-    echo "GRUB_CMDLINE_LINUX_SECURITY=\"security=\" added to $GRUB_FILE"
-    sudo tee -a "$GRUB_FILE" > /dev/null << EOF
-
-# Disable Kysec for System Monitor (Auto-generated)
-GRUB_CMDLINE_LINUX_SECURITY="security="
-EOF
-    sudo update-grub
-    echo "Kysec disabled. Please reboot to take effect."
-    echo "Reboot command: sudo reboot"
-else
-    echo "Kysec already disabled or not present."
-fi
-
-mkdir -p /tmp/logs/rocketmq-cpp
-chmod 777 /tmp/logs/rocketmq-cpp
-echo "RocketMQ log dir prepared"
-
-# ============ 9. 开机自动清理 /tmp/_MEI* ============
-echo "Setting up PyInstaller temp cleanup..."
-sudo tee /usr/local/bin/cleanup-pyinstaller-tmp.sh > /dev/null << 'EOF'
-#!/bin/bash
-# 清理 PyInstaller 临时目录
-find /tmp -name "_MEI*" -type d -exec rm -rf {} + 2>/dev/null || true
-EOF
-sudo chmod +x /usr/local/bin/cleanup-pyinstaller-tmp.sh
-
-echo "root /usr/local/bin/cleanup-pyinstaller-tmp.sh" | sudo tee /etc/cron.@reboot > /dev/null
-
-# ============ 10. 创建 systemd 服务 ============
-echo "Creating systemd service..."
-cat > "/etc/systemd/system/$SERVICE_NAME.service" << EOL
+# ========= 6. systemd 服务（支持热重启）=========
+cat > "/etc/systemd/system/$SERVICE_NAME.service" << 'EOL'
 [Unit]
 Description=System Monitor Service
 After=network.target
 
 [Service]
-ExecStart=$INSTALL_DIR/system_monitor
-WorkingDirectory=$INSTALL_DIR
-Environment="PYINSTALLER_TMP=$RUNTIME_TMP"
-Environment="LD_LIBRARY_PATH=$LIB_DIR:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
-PrivateTmp=no
-ProtectSystem=full
-ProtectHome=yes
+ExecStart=/opt/system_monitor/system_monitor
+WorkingDirectory=/opt/system_monitor
+Environment="LD_LIBRARY_PATH=/opt/system_monitor/lib:/usr/lib/x86_64-linux-gnu"
+Environment="PYINSTALLER_TMP=/opt/system_monitor/tmp"
 Restart=always
+RestartSec=3
 User=root
-KillMode=none
+KillMode=process
 RuntimeDirectory=system_monitor_tmp
 RuntimeDirectoryMode=0700
 
@@ -175,20 +67,18 @@ RuntimeDirectoryMode=0700
 WantedBy=multi-user.target
 EOL
 
-chown root:root "/etc/systemd/system/$SERVICE_NAME.service"
-chmod 644 "/etc/systemd/system/$SERVICE_NAME.service"
-
-# ============ 11. 启动服务 ============
-echo "Starting System Monitor service..."
 systemctl daemon-reload
-systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
-systemctl start "$SERVICE_NAME" > /dev/null 2>&1 || true
+systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
 
-# ============ 12. 完成 ============
-echo "System Monitor installed successfully on Kylin OS."
-echo "Kysec disabled - reboot required for full effect: sudo reboot"
-echo "Runtime temp: $RUNTIME_TMP (700, whitelisted)"
-echo "Libraries in: $LIB_DIR (755, whitelisted)"
-echo "Security popups: DISABLED (via GRUB)"
-echo "Temp cleanup: enabled on boot"
+# ========= 7. 启动新进程（确保只有一个）=========
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+    systemctl restart "$SERVICE_NAME"
+    echo "Service hot-restarted successfully."
+else
+    systemctl start "$SERVICE_NAME"
+    echo "Service started."
+fi
+
+echo "System Monitor successfully installed/upgraded"
+echo "No popups · Hot deploy · Single process · Ready"
 exit 0

@@ -62,7 +62,7 @@ cp dist/report_uninstall deb_package/opt/system_monitor/report_uninstall
 cp config.json deb_package/opt/system_monitor/config.json
 
 # 4. 复制 control, postinst, prerm
-chmod 755 deb_package/DEBIAN/postinst deb_package/DEBIAN/prerm
+chmod 755 deb_package/DEBIAN/postinst deb_package/DEBIAN/prerm deb_package/DEBIAN/postrm
 
 # 5. 构建
 dpkg-deb --build deb_package

@@ -139,7 +139,7 @@ class SystemMonitorService:
 
                 time.sleep(self.check_interval)
             except Exception as e:
-                logging.error(f"Time check loop error: {e}")
+                logging.error(f"Time  check loop error: {e}")
                 time.sleep(self.check_interval)
 
     def cache_hardware_and_software(self):
