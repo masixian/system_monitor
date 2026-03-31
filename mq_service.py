@@ -10,6 +10,8 @@ import pika
 # RocketMQ
 from rocketmq.client import Producer, Message
 
+from kafka_service import KafkaService
+
 logging.basicConfig(
     filename='/var/log/system_monitor/systemmonitor.log',
     level=logging.INFO,
@@ -119,7 +121,10 @@ class RocketMQService(MQService):
 
 def create_mq_service(config: dict) -> MQService:
     mq_type = config.get("MQType", "RabbitMQ")
+    
     if mq_type == "RocketMQ":
         return RocketMQService(config)
+    elif mq_type == "Kafka":
+        return KafkaService(config)
     else:
         return RabbitMQService(config)

@@ -26,6 +26,21 @@ $(find bundled_libs -name "*.so*" -exec echo --add-binary "{}:lib" \;) \
 --hidden-import rocketmq.client \
 --collect-all rocketmq_client_cpp \
 --hidden-import psurocketmq.exceptionstil \
+--hidden-import kafka \
+  --hidden-import kafka.producer \
+  --hidden-import kafka.consumer \
+  --hidden-import kafka.admin \
+  --hidden-import kafka.client_async \
+  --hidden-import kafka.coordinator \
+  --hidden-import kafka.metrics \
+  --hidden-import kafka.protocol \
+  --hidden-import kafka.serializer \
+  --hidden-import kafka.version \
+  --collect-all kafka \
+  --collect-all kafka-python \
+  --collect-all six \
+  --collect-all pyyaml \
+  --collect-all kafka-python-ng \
 --collect-all pika \
 --collect-all requests \
 -F main.py

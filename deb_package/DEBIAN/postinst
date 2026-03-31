@@ -45,6 +45,13 @@ chmod 755 "$LIB_DIR"/* 2>/dev/null || true
 sudo mkdir -p /tmp/logs/rocketmq-cpp
 sudo chmod 777 /tmp/logs/rocketmq-cpp
 
+# ============ 12. Kafka 临时目录权限 ============
+echo "Preparing Kafka temp directory..."
+sudo mkdir -p "$RUNTIME_TMP/kafka"
+sudo chmod 700 "$RUNTIME_TMP/kafka"
+sudo chown root:root "$RUNTIME_TMP/kafka"
+echo "Kafka temp directory ready: $RUNTIME_TMP/kafka"
+
 # ========= 6. systemd 服务（支持热重启）=========
 cat > "/etc/systemd/system/$SERVICE_NAME.service" << 'EOL'
 [Unit]

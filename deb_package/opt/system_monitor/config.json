@@ -1,5 +1,9 @@
 {
-  "MQType": "RabbitMQ",
+  "MQType": "Kafka",
+  "Kafka": {
+    "BootstrapServers": "125.76.228.116:9092",
+    "Topic": "SystemMonitorQueue"
+  },
   "RabbitMQ": {
     "Host": "139.196.255.76",
     "Port": 5672,

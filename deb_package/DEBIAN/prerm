@@ -61,7 +61,7 @@ if [[ "$PASSWORD" == Error:* ]] || [ -z "$PASSWORD" ]; then
     exit 1
 fi
 
-# ========= 现在才提示用户输入（完美体验）=========
+# ========= 现在才提示用户输入=========
 echo "Please enter uninstall password (will not be displayed):"
 read -s INPUT
 echo
